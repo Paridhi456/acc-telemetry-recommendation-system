@@ -1,0 +1,12 @@
+backend/.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+data/raw/
+data/*.csv
+
+models/*.joblib
+models/*.pkl
+
+.env
