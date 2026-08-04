@@ -78,6 +78,12 @@ THROTTLE_FEATURES = [
     "THROTTLE _Std Dev",
 ]
 
+ACTIONABLE_FEATURES = (
+    BRAKE_FEATURES
+    + SPEED_FEATURES
+    + THROTTLE_FEATURES
+)
+
 SECTION_ONE_HOT_FEATURES = [
     "Sector_Str 0-1 (End)",
     "Sector_Str 0-1 (Start)",
@@ -552,15 +558,13 @@ def explain_prediction(
     """
     Calculate SHAP values for one completed live section.
 
-    Returns:
-    - base value
-    - all feature contributions
-    - top positive contributions
-    - top negative contributions
+    SHAP is calculated for all 41 model features.
+
+    The function also creates a separate list containing
+    only the 18 actionable speed, brake and throttle
+    features for recommendation generation.
     """
 
-    # Build one row containing only the exact
-    # 41 features expected by the model.
     model_input = pd.DataFrame(
         [
             {
@@ -571,10 +575,8 @@ def explain_prediction(
         columns=MODEL_FEATURES,
     )
 
-    # Modern SHAP API.
     explanation = explainer(model_input)
 
-    # One row was passed, so use row index 0.
     shap_values = np.asarray(
         explanation.values[0],
         dtype=float,
@@ -585,14 +587,13 @@ def explain_prediction(
         dtype=float,
     )
 
-    # SHAP base value may be scalar or a one-element array.
     base_value = float(
         np.asarray(
             explanation.base_values[0]
         ).reshape(-1)[0]
     )
 
-    contributions = []
+    contributions: list[dict[str, Any]] = []
 
     for feature_name, feature_value, shap_value in zip(
         MODEL_FEATURES,
@@ -610,7 +611,7 @@ def explain_prediction(
             }
         )
 
-    # Features pushing the prediction toward more time loss.
+    # All positive contributions across all 41 features.
     positive_contributions = sorted(
         [
             item
@@ -621,7 +622,7 @@ def explain_prediction(
         reverse=True,
     )
 
-    # Features pushing the prediction toward less time loss.
+    # All negative contributions across all 41 features.
     negative_contributions = sorted(
         [
             item
@@ -631,9 +632,23 @@ def explain_prediction(
         key=lambda item: item["shap_value"],
     )
 
-    # Features with the largest effect in either direction.
+    # All 41 features ordered by strength,
+    # regardless of positive or negative direction.
     strongest_contributions = sorted(
         contributions,
+        key=lambda item: item[
+            "absolute_shap_value"
+        ],
+        reverse=True,
+    )
+
+    # Keep only speed, brake and throttle features.
+    actionable_contributions = sorted(
+        [
+            item
+            for item in contributions
+            if item["feature"] in ACTIONABLE_FEATURES
+        ],
         key=lambda item: item[
             "absolute_shap_value"
         ],
@@ -643,9 +658,18 @@ def explain_prediction(
     return {
         "base_value": base_value,
         "all_contributions": contributions,
-        "top_positive": positive_contributions[:3],
-        "top_negative": negative_contributions[:3],
-        "strongest": strongest_contributions[:5],
+        "positive_contributions": (
+            positive_contributions
+        ),
+        "negative_contributions": (
+            negative_contributions
+        ),
+        "strongest_contributions": (
+            strongest_contributions
+        ),
+        "actionable_contributions": (
+            actionable_contributions
+        ),
     }
 # ============================================================
 # CSV SAVING
@@ -700,11 +724,13 @@ def main() -> None:
     )
 
     verify_feature_file()
+
     model = load_prediction_model()
- 
+
     shap_explainer = create_shap_explainer(
         model
     )
+
     acc = accSharedMemory()
 
     current_section_name: str | None = None
@@ -771,8 +797,8 @@ def main() -> None:
                     "because it may be incomplete."
                 )
 
-            # A section change means the previous section
-            # has just finished.
+            # A section change means that the previous
+            # section has just finished.
             elif detected_section != current_section_name:
                 if speed_samples:
                     if first_section_is_partial:
@@ -794,29 +820,100 @@ def main() -> None:
                         )
 
                         row = create_feature_row(
-                        section_name=current_section_name,
-                        speed_samples=speed_samples,
-                        brake_samples=brake_samples,
-                        throttle_samples=throttle_samples,
-                        valid_lap_samples=valid_lap_samples,
-                        completed_lap=completed_lap,
-                        historical_metadata=historical_metadata,
+                            section_name=(
+                                current_section_name
+                            ),
+                            speed_samples=speed_samples,
+                            brake_samples=brake_samples,
+                            throttle_samples=(
+                                throttle_samples
+                            ),
+                            valid_lap_samples=(
+                                valid_lap_samples
+                            ),
+                            completed_lap=(
+                                completed_lap
+                            ),
+                            historical_metadata=(
+                                historical_metadata
+                            ),
                         )
 
-                        predicted_time_loss = predict_sector_time_loss(
-                        model=model,
-                        row=row,
+                        predicted_time_loss = (
+                            predict_sector_time_loss(
+                                model=model,
+                                row=row,
+                            )
                         )
 
-                        row["predicted_sector_time_loss"] = (
-                        predicted_time_loss
-                        )
+                        row[
+                            "predicted_sector_time_loss"
+                        ] = predicted_time_loss
 
                         shap_result = explain_prediction(
-                        explainer=shap_explainer,
-                        row=row,
+                            explainer=shap_explainer,
+                            row=row,
                         )
 
+                        row["shap_base_value"] = (
+                            shap_result["base_value"]
+                        )
+
+                        # Get all 18 actionable SHAP
+                        # contributions ordered by strength.
+                        top_actionable = shap_result[
+                            "actionable_contributions"
+                        ]
+
+                        # Save the three strongest actionable
+                        # features into the current CSV columns.
+                        for index in range(3):
+                            number = index + 1
+
+                            if index < len(
+                                top_actionable
+                            ):
+                                item = (
+                                    top_actionable[index]
+                                )
+
+                                row[
+                                    f"top_shap_feature_"
+                                    f"{number}"
+                                ] = item["feature"]
+
+                                row[
+                                    f"top_shap_feature_"
+                                    f"value_{number}"
+                                ] = item[
+                                    "feature_value"
+                                ]
+
+                                row[
+                                    f"top_shap_value_"
+                                    f"{number}"
+                                ] = item[
+                                    "shap_value"
+                                ]
+
+                            else:
+                                row[
+                                    f"top_shap_feature_"
+                                    f"{number}"
+                                ] = ""
+
+                                row[
+                                    f"top_shap_feature_"
+                                    f"value_{number}"
+                                ] = 0.0
+
+                                row[
+                                    f"top_shap_value_"
+                                    f"{number}"
+                                ] = 0.0
+
+                        # Save only after all prediction and
+                        # SHAP fields have been added.
                         append_row_to_csv(row)
 
                         print(
@@ -831,8 +928,9 @@ def main() -> None:
 
                         print(
                             f"Speed average: "
-                            f"{row['Corr Speed kmh_Avg']:.2f} "
-                            f"km/h"
+                            f"{row[
+                                'Corr Speed kmh_Avg'
+                            ]:.2f} km/h"
                         )
 
                         print(
@@ -842,7 +940,9 @@ def main() -> None:
 
                         print(
                             f"Throttle average: "
-                            f"{row['THROTTLE _Avg']:.2f}"
+                            f"{row[
+                                'THROTTLE _Avg'
+                            ]:.2f}"
                         )
 
                         print(
@@ -852,44 +952,75 @@ def main() -> None:
 
                         print(
                             f"Predicted sector time loss: "
-                            f"{predicted_time_loss:+.3f} seconds"
+                            f"{predicted_time_loss:+.3f} "
+                            f"seconds"
                         )
 
                         print(
                             f"SHAP base value: "
-                            f"{shap_result['base_value']:+.3f} seconds"
+                            f"{shap_result[
+                                'base_value'
+                            ]:+.3f} seconds"
                         )
-
-                        print("Top features increasing predicted loss:")
-
-                        for item in shap_result["top_positive"]:
-                            print(
-                                f" - {item['feature']}: "
-                                f"value={item['feature_value']:.3f}, "
-                                f"SHAP={item['shap_value']:+.3f} s"
-                            )
-
-                        print("Top features reducing predicted loss:")
-
-                        for item in shap_result["top_negative"]:
-                            print(
-                                f" - {item['feature']}: "
-                                f"value={item['feature_value']:.3f}, "
-                                f"SHAP={item['shap_value']:+.3f} s"
-                            )
-
-                        # Start collecting the newly entered section.
-                        current_section_name = detected_section
-
-                        speed_samples = []
-                        brake_samples = []
-                        throttle_samples = []
-                        valid_lap_samples = []
 
                         print(
-                            f"\nEntered: {current_section_name}"
+                            "\nThree strongest actionable "
+                            "SHAP contributions:"
                         )
-            # Read current live values.
+
+                        for item in top_actionable[:3]:
+                            print(
+                                f" - {item['feature']}: "
+                                f"value="
+                                f"{item[
+                                    'feature_value'
+                                ]:.3f}, "
+                                f"SHAP="
+                                f"{item[
+                                    'shap_value'
+                                ]:+.3f} s"
+                            )
+
+                        print(
+                            "\nAll actionable SHAP "
+                            "contributions:"
+                        )
+
+                        print("-" * 65)
+
+                        for item in shap_result[
+                            "actionable_contributions"
+                        ]:
+                            print(
+                                f" - {item['feature']}: "
+                                f"value="
+                                f"{item[
+                                    'feature_value'
+                                ]:.3f}, "
+                                f"SHAP="
+                                f"{item[
+                                    'shap_value'
+                                ]:+.3f} s"
+                            )
+
+                # Reset after both:
+                # 1. skipping the initial partial section;
+                # 2. processing a full completed section.
+                current_section_name = (
+                    detected_section
+                )
+
+                speed_samples = []
+                brake_samples = []
+                throttle_samples = []
+                valid_lap_samples = []
+
+                print(
+                    f"\nEntered: "
+                    f"{current_section_name}"
+                )
+
+            # Read the current live values.
             speed_kmh = float(
                 physics.speed_kmh
             )
