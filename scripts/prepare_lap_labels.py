@@ -43,7 +43,7 @@ def prepare_lap_labels() -> None:
     )
 
     conflicts = (
-        labels_df.  (["PID", "Lap"])["cluster_label"]
+        labels_df.groupby(["PID", "Lap"])["cluster_label"]
         .nunique()
     )
 
